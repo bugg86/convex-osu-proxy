@@ -1,3 +1,6 @@
+// Portable across Bun services: copy this file, no edits required. The service
+// name comes from OTEL_SERVICE_NAME, falling back to the app's package.json
+// name, so a forgotten env var can never merge two apps' telemetry together.
 import {
   context,
   metrics,
@@ -15,17 +18,32 @@ import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-ho
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import pkg from "./package.json";
 
-const resource = resourceFromAttributes({
-  [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? "convex-osu-proxy",
-});
+const serviceName = process.env.OTEL_SERVICE_NAME?.trim() || pkg.name?.trim();
+
+if (!serviceName) {
+  throw new Error(
+    "Telemetry: no service name. Set OTEL_SERVICE_NAME or give package.json a name.",
+  );
+}
+
+if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      msg: "OTEL_EXPORTER_OTLP_ENDPOINT unset, exporting telemetry to localhost:4318",
+      service: serviceName,
+    }),
+  );
+}
+
+const resource = resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName });
 
 const meterProvider = new MeterProvider({
   resource,
   readers: [
     new PeriodicExportingMetricReader({
-      // Endpoint comes from OTEL_EXPORTER_OTLP_ENDPOINT (http://alloy:4318 in compose),
-      // falls back to http://localhost:4318 for local dev.
       exporter: new OTLPMetricExporter(),
       exportIntervalMillis: 15_000,
     }),
@@ -45,8 +63,8 @@ contextManager.enable();
 context.setGlobalContextManager(contextManager);
 propagation.setGlobalPropagator(new W3CTraceContextPropagator());
 
-const meter = metrics.getMeter("convex-osu-proxy");
-const tracer = trace.getTracer("convex-osu-proxy");
+const meter = metrics.getMeter(serviceName);
+const tracer = trace.getTracer(serviceName);
 
 const requestCount = meter.createCounter("http.server.request.count", {
   description: "Total HTTP requests handled",
@@ -117,6 +135,7 @@ export function instrumentRoutes<T extends Record<string, Record<string, RouteHa
             JSON.stringify({
               level: status >= 500 ? "error" : "info",
               msg: "request",
+              service: serviceName,
               route,
               method,
               status,
